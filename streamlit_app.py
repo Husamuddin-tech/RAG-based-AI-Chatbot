@@ -1,11 +1,17 @@
 import json
+import os
 import urllib.error
 import urllib.request
 
 import streamlit as st
 
 
-FASTAPI_URL = "http://127.0.0.1:8000/chat"
+
+
+FASTAPI_URL = os.getenv(
+    "FASTAPI_URL",
+    "http://127.0.0.1:8000/chat",
+)
 
 
 st.set_page_config(
