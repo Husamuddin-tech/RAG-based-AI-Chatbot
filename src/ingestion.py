@@ -1,26 +1,33 @@
 import argparse
 import os
+import time
 
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
 
 
-# Load environment variables from .env
 load_dotenv()
+
+
+# Keep comfortably below the current free-tier embedding request limit.
+BATCH_SIZE = 50
+
+# Wait long enough for the minute-based quota window to reset.
+BATCH_WAIT_SECONDS = 65
 
 
 def setup_pinecone_index(index_name: str) -> None:
     """Create the Pinecone index if it does not already exist."""
-    api_key = os.getenv("PINECONE_API_KEY")
+    pinecone_api_key = os.getenv("PINECONE_API_KEY")
 
-    if not api_key:
+    if not pinecone_api_key:
         raise ValueError("PINECONE_API_KEY is not set in the environment.")
 
-    pc = Pinecone(api_key=api_key)
+    pc = Pinecone(api_key=pinecone_api_key)
 
     existing_indexes = [index.name for index in pc.list_indexes()]
 
@@ -41,9 +48,11 @@ def setup_pinecone_index(index_name: str) -> None:
 
 
 def run_ingestion(pdf_path: str, index_name: str):
-    """Load the PDF, split it into chunks, embed the chunks, and store them in Pinecone."""
+    """Load, chunk, embed, and store the Agentic AI eBook."""
 
+    # ---------------------------------------------------------
     # 1. Load document
+    # ---------------------------------------------------------
     print(f"Loading PDF: {pdf_path}")
 
     loader = PyPDFLoader(pdf_path)
@@ -51,7 +60,9 @@ def run_ingestion(pdf_path: str, index_name: str):
 
     print(f"Loaded {len(docs)} pages.")
 
+    # ---------------------------------------------------------
     # 2. Chunk document
+    # ---------------------------------------------------------
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
@@ -61,22 +72,64 @@ def run_ingestion(pdf_path: str, index_name: str):
 
     print(f"Created {len(chunks)} chunks.")
 
-    # 3. Create Pinecone index
+    # ---------------------------------------------------------
+    # 3. Pinecone index
+    # ---------------------------------------------------------
     setup_pinecone_index(index_name)
 
-    # 4. Create embeddings
-    embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small"
+    # ---------------------------------------------------------
+    # 4. Gemini embeddings
+    # ---------------------------------------------------------
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="gemini-embedding-2",
+        output_dimensionality=1536,
     )
 
-    # 5. Store embeddings in Pinecone
-    vector_store = PineconeVectorStore.from_documents(
-        documents=chunks,
-        embedding=embeddings,
+    # ---------------------------------------------------------
+    # 5. Create vector store
+    # ---------------------------------------------------------
+    vector_store = PineconeVectorStore(
         index_name=index_name,
+        embedding=embeddings,
     )
 
-    print(f"Stored {len(chunks)} chunks in Pinecone.")
+    # ---------------------------------------------------------
+    # 6. Upload embeddings in controlled batches
+    # ---------------------------------------------------------
+    total_chunks = len(chunks)
+
+    for start in range(0, total_chunks, BATCH_SIZE):
+        end = min(start + BATCH_SIZE, total_chunks)
+        batch = chunks[start:end]
+
+        batch_number = (start // BATCH_SIZE) + 1
+        total_batches = (
+            (total_chunks + BATCH_SIZE - 1) // BATCH_SIZE
+        )
+
+        print(
+            f"Embedding batch {batch_number}/{total_batches} "
+            f"({start + 1}-{end} of {total_chunks})..."
+        )
+
+        vector_store.add_documents(batch)
+
+        print(
+            f"Uploaded batch {batch_number}/{total_batches}."
+        )
+
+        # Wait between batches except after the final batch.
+        if end < total_chunks:
+            print(
+                f"Waiting {BATCH_WAIT_SECONDS} seconds "
+                "before the next embedding batch..."
+            )
+            time.sleep(BATCH_WAIT_SECONDS)
+
+    print(
+        f"Ingestion completed successfully. "
+        f"Stored {total_chunks} chunks in Pinecone."
+    )
 
     return vector_store
 
@@ -108,12 +161,6 @@ def main() -> None:
     run_ingestion(
         args.pdf_path,
         args.index_name,
-    )
-
-    print(
-        f"Ingestion completed for "
-        f"'{args.pdf_path}' into Pinecone index "
-        f"'{args.index_name}'."
     )
 
 
